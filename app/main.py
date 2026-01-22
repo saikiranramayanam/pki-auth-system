@@ -1,23 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import time
-import base64
+import os
 from .utils import compute_totp, decrypt_seed
-
+import time
 app = FastAPI()
 
-# Load seed.txt (may be empty before decrypt-seed is called)
-try:
-    with open("seed.txt", "rb") as f:
-        SEED = f.read().strip()
-except FileNotFoundError:
-    SEED = b""
+SEED_PATH = "/data/seed.txt"
 
+# -----------------------------
 # Request models
-class VerifyRequest(BaseModel):
-    roll: str
-    timestamp: int
-
+# -----------------------------
 class DecryptRequest(BaseModel):
     encrypted_seed: str
 
@@ -31,23 +23,32 @@ def home():
 
 
 # -----------------------------
-# 1) DECRYPT SEED (writes seed.txt)
+# 1) DECRYPT SEED
 # -----------------------------
 @app.post("/decrypt-seed")
 def decrypt_seed_api(data: DecryptRequest):
-    global SEED
+    try:
+        decrypted_seed = decrypt_seed(data.encrypted_seed)
 
-    # decrypt base64 → seed hex bytes
-    decrypted_seed = decrypt_seed(data.encrypted_seed)
+        # MUST write to /data/seed.txt
+        with open(SEED_PATH, "wb") as f:
+            f.write(decrypted_seed)
 
-    # Save decrypted seed to seed.txt
-    with open("seed.txt", "wb") as f:
-        f.write(decrypted_seed)
+        return {"status": "ok"}
 
-    # Update memory
-    SEED = decrypted_seed
+    except Exception:
+        raise HTTPException(status_code=500, detail="Decryption failed")
 
-    return {"status": "ok"}
+
+# -----------------------------
+# Helper: read seed safely
+# -----------------------------
+def read_seed() -> bytes:
+    if not os.path.exists(SEED_PATH):
+        raise HTTPException(status_code=500, detail="Seed not decrypted yet")
+
+    with open(SEED_PATH, "rb") as f:
+        return f.read().strip()
 
 
 # -----------------------------
@@ -55,13 +56,15 @@ def decrypt_seed_api(data: DecryptRequest):
 # -----------------------------
 @app.get("/generate-2fa")
 def generate_2fa():
-    if not SEED:
-        return {"error": "seed.txt is not loaded yet"}
+    seed = read_seed()
 
-    current_time = int(time.time())
-    code = compute_totp(SEED, current_time)
+    # DO NOT pass time manually
+    code = compute_totp(seed)
 
-    return {"code": code, "valid_for": 30}
+    return {
+        "code": code,
+        "valid_for": 30
+    }
 
 
 # -----------------------------
@@ -69,24 +72,12 @@ def generate_2fa():
 # -----------------------------
 @app.post("/verify-2fa")
 def verify_2fa(data: CodeRequest):
-    if not SEED:
-        return {"error": "seed.txt is not loaded yet"}
+    seed = read_seed()
+    now = int(time.time())
 
-    current_time = int(time.time())
-    correct_code = compute_totp(SEED, current_time)
+    # Check current, previous, and next 30s window
+    for offset in (-30, 0, 30):
+        if compute_totp(seed, now + offset) == data.code:
+            return {"valid": True}
 
-    return {"valid": data.code == correct_code}
-
-
-# -----------------------------
-# 4) ORIGINAL VERIFY ENDPOINT
-# -----------------------------
-@app.post("/verify")
-def verify(data: VerifyRequest):
-    totp_code = compute_totp(SEED, data.timestamp)
-
-    return {
-        "student_roll": data.roll,
-        "timestamp": data.timestamp,
-        "totp": totp_code
-    }
+    return {"valid": False}

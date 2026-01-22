@@ -1,43 +1,55 @@
 import base64
-import binascii
 import pyotp
-import hmac
-import hashlib
-import time
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 
+PRIVATE_KEY_PATH = "/app/student_private.pem"
 
 # -------------------------
-# FIXED TOTP GENERATOR
+# TOTP GENERATOR
 # -------------------------
-
 def compute_totp(seed_bytes: bytes, timestamp: int = None) -> str:
     """
-    Compute a 6-digit TOTP from seed bytes.
-    timestamp = Unix time (default = now)
+    Compute a 6-digit TOTP from raw seed bytes.
+    Uses SHA1, 30s interval (pyotp default).
     """
     if not isinstance(seed_bytes, (bytes, bytearray)):
         raise ValueError("seed must be raw bytes")
 
-    # convert bytes -> Base32
+    # Convert bytes → Base32
     b32 = base64.b32encode(seed_bytes).decode()
 
-    # TOTP object
     totp = pyotp.TOTP(b32, digits=6, interval=30)
 
-    # default timestamp = current time
     if timestamp is None:
         return totp.now()
 
-    # generate TOTP for a specific timestamp
     return totp.at(timestamp)
 
 
 # -------------------------
-# DECRYPT SEED FUNCTION (BASE64 DECODE)
+# RSA DECRYPT SEED
 # -------------------------
-
 def decrypt_seed(enc: str) -> bytes:
     try:
-        return base64.b64decode(enc)
-    except Exception:
-        raise ValueError("Invalid encrypted_seed value")
+        encrypted_bytes = base64.b64decode(enc)
+
+        with open(PRIVATE_KEY_PATH, "rb") as f:
+            private_key = serialization.load_pem_private_key(
+                f.read(),
+                password=None
+            )
+
+        decrypted = private_key.decrypt(
+            encrypted_bytes,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        return decrypted
+
+    except Exception as e:
+        raise ValueError("Seed decryption failed") from e
